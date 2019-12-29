@@ -1,10 +1,12 @@
 #include <ESP8266WiFi.h>
-#include <WiFiClient.h>
 #include <DNSServer.h>
 #include <ESP8266WebServer.h>
 #include <WiFiManager.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
+#include <WebConfig.h>
+
+/* ----------------------------------------------------------- */
 
 #define PIN_LED_RED   16 // D0
 #define PIN_LED_GREEN  0 // D3
@@ -12,18 +14,75 @@
 #define PIN_RCWL_0516 14 // D5
 #define PIN_LDR       A0
 
+const char thingName[] = "Rabbit";
+const char wifiInitialApPassword[] = "rabbit";
+
+DNSServer dnsServer;
 ESP8266WebServer server(80);
 Adafruit_BME280 bme;
+WebConfig config;
 
 bool lastMovement = false;
-long lastMovementTime = 0;
+bool presence = false;
+bool darkness = false;
 int lastLightValue = 0;
-long lastLightReadTime = 0;
 float lastTemperature = 0.0;
 float lastHumidity = 0.0;
 float lastPressure = 0.0;
+unsigned long lastMovementTime = 0;
+unsigned long lastLightReadTime = 0;
+unsigned long lastBmeReadTime = 0;
+
+int red = 0;
+int green = 0;
+int blue = 0;
 
 bool ledOn = false;
+
+// begin WebConfig -----------------------------------------------------------------
+
+
+String configParams = "["
+  "{"
+  "'name':'red',"
+  "'label':'Red',"
+  "'type':"+String(INPUTRANGE)+","
+  "'min':0,'max':255,"
+  "'default':'255'"
+  "},"
+  "{"
+  "'name':'green',"
+  "'label':'Green',"
+  "'type':"+String(INPUTRANGE)+","
+  "'min':0,'max':255,"
+  "'default':'255'"
+  "},"
+  "{"
+  "'name':'blue',"
+  "'label':'Blue',"
+  "'type':"+String(INPUTRANGE)+","
+  "'min':0,'max':255,"
+  "'default':'255'"
+  "},"
+  "{"
+  "'name':'lightThreshold',"
+  "'label':'Light threshold',"
+  "'type':"+String(INPUTRANGE)+","
+  "'min':0,'max':1023,"
+  "'default':'300'"
+  "},"
+  "{"
+  "'name':'moveTimeout',"
+  "'label':'Movement timeout (s)',"
+  "'type':"+String(INPUTNUMBER)+","
+  "'min':1,'max':10000,"
+  "'default':'60'"
+  "}"
+  "]";
+
+// end WebConfig -------------------------------------------------------------------
+
+// begin setup ---------------------------------------------------------------------
 
 void setupIO() {
   pinMode(PIN_LED_RED, OUTPUT);
@@ -33,6 +92,8 @@ void setupIO() {
   pinMode(PIN_LDR, INPUT);
 
   Serial.begin(115200);
+  Serial.println();
+  Serial.println("Starting up...");
 
   if (!bme.begin(0x76))
   {   
@@ -48,7 +109,7 @@ void setupIO() {
   Serial.println("BME280 ok");
 }
 
-void setupWifi(void) {
+void setupWifi() {
   WiFiManager wifiManager;
   wifiManager.autoConnect();
   Serial.print("Connected to ");
@@ -57,13 +118,35 @@ void setupWifi(void) {
   Serial.println(WiFi.localIP());
 }
 
-void readBme()
+void setupConfig()
 {
-  bme.takeForcedMeasurement();
-  lastTemperature = bme.readTemperature();
-  lastHumidity = bme.readHumidity();
-  lastPressure = bme.readPressure() / 100.0F;
+  config.setDescription(configParams);
+  config.readConfig();  
 }
+
+void setupHttpServer() {
+  server.on("/", httpHandleRoot);  
+  server.on("/temperature", httpHandleTemperature);  
+  server.on("/humidity", httpHandleHumidity);
+  server.on("/pressure", httpHandlePressure);
+  server.on("/led", httpHandleLed);
+  server.on("/config", httpHandleConfig);
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
+void setup() {
+  setupIO();
+  setupWifi();
+  setupConfig();
+  setupHttpServer();
+  setLed(0, 0, 0);
+  Serial.println("Ready.");
+}
+
+// end setup -----------------------------------------------------------------------
+
+// begin HTTP ----------------------------------------------------------------------
 
 String createHTML(float temperature, float humidity, float pressure){
   String ptr = "<!DOCTYPE html> <html>\n";
@@ -90,6 +173,9 @@ String createHTML(float temperature, float humidity, float pressure){
   ptr += lastLightValue;
   ptr += "</p>";
   ptr += "<p>Presence: ";
+  ptr += (presence ? "yes" : "no");
+  ptr += "</p>";
+  ptr += "<p>Light on: ";
   ptr += (ledOn ? "yes" : "no");
   ptr += "</p>";
   ptr += "</div>\n";
@@ -100,6 +186,7 @@ String createHTML(float temperature, float humidity, float pressure){
 
 void httpHandleRoot() {
   Serial.println("HTTP handle root");
+  
   readBme();
 
   setLed(map(lastTemperature, 0, 35, 0, 1023),
@@ -107,6 +194,15 @@ void httpHandleRoot() {
          map(lastHumidity, 0, 100, 0, 1023));  
     
   server.send(200, "text/html", createHTML(lastTemperature, lastHumidity, lastPressure)); 
+}
+
+void httpHandleConfig() 
+{
+  config.handleFormRequest(&server);
+  if (server.hasArg("SAVE")) 
+  {
+    onConfigurationChanged();
+  }  
 }
 
 void httpHandleTemperature() {
@@ -124,14 +220,6 @@ void httpHandlePressure() {
   server.send(200, "text/plain", String(lastPressure, 1));
 }
 
-int mapColor(String value)
-{
-  int numValue = value.toInt();
-  if (numValue < 0) numValue = 0;
-  if (numValue > 255) numValue = 255;
-  return map(numValue, 0, 255, 0, 1023);
-}
-
 void httpHandleLed() {
 
   if(server.args() > 0) {
@@ -145,31 +233,124 @@ void httpHandleLed() {
   server.send(200, "text/plain", "ok");
 }
 
-void setupHttpServer(void) {
-  server.on("/", httpHandleRoot);  
-  server.on("/temperature", httpHandleTemperature);  
-  server.on("/humidity", httpHandleHumidity);
-  server.on("/pressure", httpHandlePressure);
-  server.on("/led", httpHandleLed);
-  server.begin();
-  Serial.println("HTTP server started");
-}
+// end HTTP ----------------------------------------------------------------------
 
-void setup() {
-  setupIO();
-  setupWifi();
-  setupHttpServer();
-  setLed(0, 0, 0);
-}
-
-void loop() {
+void loop() {  
   server.handleClient();
+  readBme();
   checkMovement();
+  readLightValue();
+}
+
+void onConfigurationChanged()
+{
+  Serial.println("Configuration was updated.");
+  Serial.print("Movement timeout: ");
+  Serial.print(config.getInt("moveTimeout"));
+  Serial.println("s");
+  Serial.print("Light threshold: ");
+  Serial.println(config.getInt("lightThreshold"));
+  
+  red = map(config.getInt("red"), 0, 255, 0, 1023);
+  green = map(config.getInt("green"), 0, 255, 0, 1023);
+  blue = map(config.getInt("blue"), 0, 255, 0, 1023);
+  evaluateTurnLedOnOrOff();
+}
+
+void readBme()
+{
+  if (millis() - lastBmeReadTime > 60000)
+  {
+    bme.takeForcedMeasurement();
+    lastTemperature = bme.readTemperature();
+    lastHumidity = bme.readHumidity();
+    lastPressure = bme.readPressure() / 100.0F;
+    lastBmeReadTime = millis();
+    onBmeValuesChanged();
+  }
+}
+
+void checkMovement()
+{
+  bool movement = digitalRead(PIN_RCWL_0516);
+  if (movement != lastMovement)
+  {
+    lastMovement = movement;
+    if (movement)
+    {
+      onMovementDetected();
+    }
+    lastMovementTime = millis();
+  }
+  
+  if (!movement)
+  {
+    onNoMovementDetected();
+  }
+}
+
+void readLightValue()
+{
   if (millis() - lastLightReadTime > 1000)
   {
-    lastLightValue = analogRead(PIN_LDR);
+    int newLightValue = analogRead(PIN_LDR);
     lastLightReadTime = millis();
+    if (lastLightValue != newLightValue)
+    {
+      Serial.print("Light value changed to ");
+      Serial.println(newLightValue);
+      lastLightValue = newLightValue;
+      onLightValueChanged();
+    }
+  }  
+}
+
+void onBmeValuesChanged()
+{  
+}
+
+void onLightValueChanged()
+{
+  boolean newDarkness = lastLightValue < config.getInt("lightThreshold");
+
+  if (newDarkness != darkness)
+  {
+    Serial.print("Darkness ");
+    Serial.println(newDarkness ? "on" : "off");
+    darkness = newDarkness;
+    evaluateTurnLedOnOrOff();
   }
+}
+
+void onMovementDetected()
+{
+  Serial.println("Movement detected");
+  presence = true;
+  evaluateTurnLedOnOrOff();
+}
+
+void onNoMovementDetected()
+{  
+  if (presence && millis() - lastMovementTime > config.getInt("moveTimeout") * 1000)
+  {
+    Serial.println("Movement timed out");
+    presence = false;
+    evaluateTurnLedOnOrOff();
+  }
+}
+
+void evaluateTurnLedOnOrOff()
+{
+  ledOn = presence & darkness;
+  setLed(red, green, blue);
+}
+
+int mapColor(String value)
+{
+  int numValue = value.toInt();
+  if (numValue < 0) numValue = 0;
+  if (numValue > 255) numValue = 255;
+  return map(numValue, 0, 255, 0, 1023);
 }
 
 void setLed(int r, int g, int b)
@@ -184,31 +365,4 @@ void setLed(int r, int g, int b)
   analogWrite(PIN_LED_RED, r);
   analogWrite(PIN_LED_GREEN, g);
   analogWrite(PIN_LED_BLUE, b);  
-}
-
-void checkMovement()
-{
-  bool movement = digitalRead(PIN_RCWL_0516);
-  if (movement != lastMovement)
-  {
-    Serial.print(millis());
-    if (movement)
-      Serial.println(" Movement detected");
-    else
-      Serial.println(" No more movement");
-
-    lastMovement = movement;
-    if (movement)
-    {
-      ledOn = true;
-      setLed(200, 100, 150);
-    }
-    lastMovementTime = millis();
-  }
-  
-  if (!movement && millis() - lastMovementTime > 10000)
-  {
-    ledOn = false;
-    setLed(0, 0, 0);
-  }
 }
