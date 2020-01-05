@@ -32,38 +32,19 @@ float lastPressure = 0.0;
 unsigned long lastMovementTime = 0;
 unsigned long lastLightReadTime = 0;
 unsigned long lastBmeReadTime = 0;
+unsigned long sweepMillis = 0;
 
 int red = 0;
 int green = 0;
 int blue = 0;
 
 bool ledOn = false;
+bool sweep = true;
 
 // begin WebConfig -----------------------------------------------------------------
 
 
 String configParams = "["
-  "{"
-  "'name':'red',"
-  "'label':'Red',"
-  "'type':"+String(INPUTRANGE)+","
-  "'min':0,'max':255,"
-  "'default':'255'"
-  "},"
-  "{"
-  "'name':'green',"
-  "'label':'Green',"
-  "'type':"+String(INPUTRANGE)+","
-  "'min':0,'max':255,"
-  "'default':'255'"
-  "},"
-  "{"
-  "'name':'blue',"
-  "'label':'Blue',"
-  "'type':"+String(INPUTRANGE)+","
-  "'min':0,'max':255,"
-  "'default':'255'"
-  "},"
   "{"
   "'name':'lightThreshold',"
   "'label':'Light threshold',"
@@ -77,6 +58,22 @@ String configParams = "["
   "'type':"+String(INPUTNUMBER)+","
   "'min':1,'max':10000,"
   "'default':'60'"
+  "},"
+  "{"
+  "'name':'sweepType',"
+  "'label':'Sweep',"
+  "'type':"+String(INPUTSELECT)+","
+  "'options':["
+  "{'v':'sweep1','l':'Normal'},"
+  "{'v':'sweep2','l':'Pastel'}],"
+  "'default':'sweep1'"
+  "},"
+  "{"
+  "'name':'sweepDelay',"
+  "'label':'Sweep delay (ms)',"
+  "'type':"+String(INPUTNUMBER)+","
+  "'min':1,'max':400,"
+  "'default':'20'"
   "}"
   "]";
 
@@ -188,11 +185,11 @@ void httpHandleRoot() {
   Serial.println("HTTP handle root");
   
   readBme();
-
+/*
   setLed(map(lastTemperature, 0, 35, 0, 1023),
          map(lastPressure, 1000, 1050, 0, 1023),
          map(lastHumidity, 0, 100, 0, 1023));  
-    
+    */
   server.send(200, "text/html", createHTML(lastTemperature, lastHumidity, lastPressure)); 
 }
 
@@ -229,6 +226,7 @@ void httpHandleLed() {
     String blue = server.arg("b");
 
     setLed(mapColor(red), mapColor(green), mapColor(blue));
+    sweep = false;
   }
   server.send(200, "text/plain", "ok");
 }
@@ -240,6 +238,7 @@ void loop() {
   readBme();
   checkMovement();
   readLightValue();
+  rgbSweep();
 }
 
 void onConfigurationChanged()
@@ -250,10 +249,11 @@ void onConfigurationChanged()
   Serial.println("s");
   Serial.print("Light threshold: ");
   Serial.println(config.getInt("lightThreshold"));
-  
-  red = map(config.getInt("red"), 0, 255, 0, 1023);
-  green = map(config.getInt("green"), 0, 255, 0, 1023);
-  blue = map(config.getInt("blue"), 0, 255, 0, 1023);
+  Serial.print("Sweep type: ");
+  Serial.println(config.getString("sweepType"));
+  Serial.print("Sweep delay: ");
+  Serial.println(config.getInt("sweepDelay"));
+
   evaluateTurnLedOnOrOff();
 }
 
@@ -351,6 +351,107 @@ int mapColor(String value)
   if (numValue < 0) numValue = 0;
   if (numValue > 255) numValue = 255;
   return map(numValue, 0, 255, 0, 1023);
+}
+
+#define S_RED 1
+#define S_GREEN 2
+#define S_BLUE 3
+#define MAX_LED 1023
+
+int currentStaticColor = S_BLUE;
+
+void rgbSweep()
+{
+  if (!sweep || !ledOn) return;
+  if (millis() - sweepMillis < config.getInt("sweepDelay"))
+    return;
+
+  sweepMillis = millis();
+
+  if (red == 0 && green == 0 && blue == 0)
+  {
+    // start sweep
+    currentStaticColor = S_BLUE;
+    green = MAX_LED;
+  }
+
+  String sweepType = config.getString("sweepType");
+  if (sweepType == String("sweep1"))
+    sweep1();
+  if (sweepType == String("sweep2"))
+    sweep2();
+}
+
+// change 1 led color at a time: normal rgb sweep
+void sweep1()
+{   
+  switch(currentStaticColor)
+  {
+    case S_RED:
+      red = MAX_LED;
+      if (blue > 0)
+        blue--;  
+      else 
+        green++;
+      if (green == MAX_LED)
+        currentStaticColor = S_GREEN;
+      break;
+    case S_GREEN:
+      green = MAX_LED;
+      if (red > 0)
+        red--;  
+      else 
+        blue++;
+      if (blue == MAX_LED)
+        currentStaticColor = S_BLUE;
+      break;
+    case S_BLUE:
+      blue = MAX_LED;
+      if (green > 0)
+        green--;  
+      else 
+        red++;
+      if (red == MAX_LED)
+        currentStaticColor = S_RED;
+      break;
+  }
+  setLed(red, green, blue);
+}
+
+// change 2 led colors at a time: pastel effect
+void sweep2()
+{ 
+  switch(currentStaticColor)
+  {
+    case S_RED:
+      red = MAX_LED;
+      green++;
+      blue--;  
+      if (blue <= 0)
+      {
+        currentStaticColor = S_GREEN;
+      }
+      break;
+    case S_GREEN:
+      green = MAX_LED;
+      blue++;
+      red--;
+      if (red <= 0)
+      {
+        currentStaticColor = S_BLUE;
+      }
+      break;
+    case S_BLUE:
+      blue = MAX_LED;
+      red++;
+      green--;
+      if (green <= 0)
+      {
+        currentStaticColor = S_RED;
+      }
+      break;
+  }
+  setLed(red, green, blue);
 }
 
 void setLed(int r, int g, int b)
