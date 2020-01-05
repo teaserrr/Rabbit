@@ -1,4 +1,5 @@
-#include <ESP8266WiFi.h>
+
+#include <PubSubClient.h>#include <ESP8266WiFi.h>
 #include <DNSServer.h>
 #include <ESP8266WebServer.h>
 #include <WiFiManager.h>
@@ -14,18 +15,25 @@
 #define PIN_RCWL_0516 14 // D5
 #define PIN_LDR       A0
 
-const char thingName[] = "Rabbit";
-const char wifiInitialApPassword[] = "rabbit";
+#define S_RED 1
+#define S_GREEN 2
+#define S_BLUE 3
+#define MAX_LED 1023
+
+#define DEVICE_NAME  "ESP-Rabbit"
 
 DNSServer dnsServer;
 ESP8266WebServer server(80);
 Adafruit_BME280 bme;
 WebConfig config;
+WiFiClient wifiClient;
+PubSubClient mqttClient(wifiClient);
 
 bool lastMovement = false;
 bool presence = false;
 bool darkness = false;
 int lastLightValue = 0;
+int currentStaticColor = S_BLUE;
 float lastTemperature = 0.0;
 float lastHumidity = 0.0;
 float lastPressure = 0.0;
@@ -33,6 +41,7 @@ unsigned long lastMovementTime = 0;
 unsigned long lastLightReadTime = 0;
 unsigned long lastBmeReadTime = 0;
 unsigned long sweepMillis = 0;
+unsigned long lastMqttReconnectAttempt = 0;
 
 int red = 0;
 int green = 0;
@@ -81,7 +90,8 @@ String configParams = "["
 
 // begin setup ---------------------------------------------------------------------
 
-void setupIO() {
+void setupIO() 
+{
   pinMode(PIN_LED_RED, OUTPUT);
   pinMode(PIN_LED_GREEN, OUTPUT);
   pinMode(PIN_LED_BLUE, OUTPUT);
@@ -106,7 +116,8 @@ void setupIO() {
   Serial.println("BME280 ok");
 }
 
-void setupWifi() {
+void setupWifi() 
+{
   WiFiManager wifiManager;
   wifiManager.autoConnect();
   Serial.print("Connected to ");
@@ -121,7 +132,8 @@ void setupConfig()
   config.readConfig();  
 }
 
-void setupHttpServer() {
+void setupHttpServer() 
+{
   server.on("/", httpHandleRoot);  
   server.on("/temperature", httpHandleTemperature);  
   server.on("/humidity", httpHandleHumidity);
@@ -132,11 +144,29 @@ void setupHttpServer() {
   Serial.println("HTTP server started");
 }
 
-void setup() {
+void setupMqtt()
+{
+  mqttClient.setServer("192.168.0.180", 1883);
+  mqttClient.setCallback(OnMqttMessageReceived);
+  reconnectMqtt();
+}
+
+boolean reconnectMqtt() 
+{
+  if (mqttClient.connect(DEVICE_NAME)) {
+    Serial.println("MQTT connected");
+    mqttClient.subscribe("lights/slk2/night/rgb");
+  }
+  return mqttClient.connected();
+}
+
+void setup() 
+{
   setupIO();
   setupWifi();
   setupConfig();
   setupHttpServer();
+  setupMqtt();
   setLed(0, 0, 0);
   Serial.println("Ready.");
 }
@@ -233,12 +263,35 @@ void httpHandleLed() {
 
 // end HTTP ----------------------------------------------------------------------
 
-void loop() {  
-  server.handleClient();
+void loop() 
+{  
   readBme();
   checkMovement();
   readLightValue();
+  server.handleClient();
+  mqttLoop();
   rgbSweep();
+}
+
+void mqttLoop()
+{
+  if (!mqttClient.connected()) 
+  {
+    if (lastMqttReconnectAttempt == 0)
+      Serial.println("MQTT disconnected");
+      
+    if (millis() - lastMqttReconnectAttempt > 5000) 
+    {
+      lastMqttReconnectAttempt = millis();
+      if (reconnectMqtt()) {
+        lastMqttReconnectAttempt = 0;
+      }
+    }    
+  }
+  else
+  {
+    mqttClient.loop();
+  }  
 }
 
 void onConfigurationChanged()
@@ -259,7 +312,7 @@ void onConfigurationChanged()
 
 void readBme()
 {
-  if (millis() - lastBmeReadTime > 60000)
+  if (lastBmeReadTime == 0 || millis() - lastBmeReadTime > 60000)
   {
     bme.takeForcedMeasurement();
     lastTemperature = bme.readTemperature();
@@ -277,15 +330,16 @@ void checkMovement()
   {
     lastMovement = movement;
     if (movement)
-    {
       onMovementDetected();
-    }
+    else
+      onNoMovementDetected();
+      
     lastMovementTime = millis();
   }
   
   if (!movement)
   {
-    onNoMovementDetected();
+    checkPresenceTimeout();
   }
 }
 
@@ -297,8 +351,8 @@ void readLightValue()
     lastLightReadTime = millis();
     if (lastLightValue != newLightValue)
     {
-      Serial.print("Light value changed to ");
-      Serial.println(newLightValue);
+      //Serial.print("Light value changed to ");
+      //Serial.println(newLightValue);
       lastLightValue = newLightValue;
       onLightValueChanged();
     }
@@ -306,7 +360,14 @@ void readLightValue()
 }
 
 void onBmeValuesChanged()
-{  
+{
+  char buf[16];
+  sprintf(buf, "%.2f", lastTemperature);
+  mqttClient.publish("sensors/slk2/env/temperature", buf);
+  sprintf(buf, "%.2f", lastHumidity);
+  mqttClient.publish("sensors/slk2/env/humidity", buf);
+  sprintf(buf, "%.2f", lastPressure);
+  mqttClient.publish("sensors/slk2/env/pressure", buf);
 }
 
 void onLightValueChanged()
@@ -327,13 +388,19 @@ void onMovementDetected()
   Serial.println("Movement detected");
   presence = true;
   evaluateTurnLedOnOrOff();
+  mqttClient.publish("sensors/slk2/presence", "true");  
 }
 
 void onNoMovementDetected()
 {  
+  mqttClient.publish("sensors/slk2/presence", "false");  
+}
+
+void checkPresenceTimeout()
+{  
   if (presence && millis() - lastMovementTime > config.getInt("moveTimeout") * 1000)
   {
-    Serial.println("Movement timed out");
+    Serial.println("Presence timed out");
     presence = false;
     evaluateTurnLedOnOrOff();
   }
@@ -350,15 +417,8 @@ int mapColor(String value)
   int numValue = value.toInt();
   if (numValue < 0) numValue = 0;
   if (numValue > 255) numValue = 255;
-  return map(numValue, 0, 255, 0, 1023);
+  return map(numValue, 0, 255, 0, MAX_LED);
 }
-
-#define S_RED 1
-#define S_GREEN 2
-#define S_BLUE 3
-#define MAX_LED 1023
-
-int currentStaticColor = S_BLUE;
 
 void rgbSweep()
 {
@@ -466,4 +526,35 @@ void setLed(int r, int g, int b)
   analogWrite(PIN_LED_RED, r);
   analogWrite(PIN_LED_GREEN, g);
   analogWrite(PIN_LED_BLUE, b);  
+}
+
+void OnMqttMessageReceived(char* topic, byte* payload, unsigned int length)
+{
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+  }
+  Serial.println();
+
+  if (String(topic) == String("lights/slk2/night/rgb")) 
+  {
+    int r, g, b;
+    int result = sscanf((const char *)payload, "%d,%d,%d", &r, &g, &b);
+    if (result > 0 && (r > 0 || g > 0 || b > 0))
+    { 
+      Serial.println("Set RGB value");
+      sweep = false;
+      ledOn = true;
+      red = map(r, 0, 255, 0, MAX_LED);
+      green = map(g, 0, 255, 0, MAX_LED);
+      blue = map(b, 0, 255, 0, MAX_LED);
+      setLed(red, green, blue);
+    }
+    else
+    {
+      sweep = true;
+    }
+  }
 }
