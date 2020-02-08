@@ -9,10 +9,14 @@
 
 /* ----------------------------------------------------------- */
 
+//#define PIN_LED_RED   16 // D0
+//#define PIN_LED_GREEN  0 // D3
+//#define PIN_LED_BLUE   2 // D4
+//#define PIN_RCWL_0516 14 // D5
 #define PIN_LED_RED   16 // D0
-#define PIN_LED_GREEN  0 // D3
-#define PIN_LED_BLUE   2 // D4
-#define PIN_RCWL_0516 14 // D5
+#define PIN_LED_GREEN 14 // D5
+#define PIN_LED_BLUE  12 // D6
+#define PIN_RCWL_0516  0 // D3
 #define PIN_LDR       A0
 
 #define S_RED 1
