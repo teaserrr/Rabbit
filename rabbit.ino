@@ -6,7 +6,6 @@
 #include <WiFiManager.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
-#include <WebConfig.h>
 
 /* ----------------------------------------------------------- */
 
@@ -26,11 +25,15 @@
 #define MAX_LED 1023
 
 #define DEVICE_NAME  "ESP-Rabbit"
+#define DEFAULT_MQTT_TOPIC_RGB "lights/slk2/night/rgb"
+#define DEFAULT_MQTT_BASE "sensors/slk2/"
+#define concat(first, second) first second
+
 
 DNSServer dnsServer;
 ESP8266WebServer server(80);
 Adafruit_BME280 bme;
-WebConfig config;
+//WebConfig config;
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 
@@ -54,57 +57,6 @@ int blue = 0;
 
 bool ledOn = false;
 bool sweep = true;
-
-// begin WebConfig -----------------------------------------------------------------
-
-
-String configParams = "["
-  "{"
-  "'name':'lightThreshold',"
-  "'label':'Light threshold',"
-  "'type':"+String(INPUTRANGE)+","
-  "'min':0,'max':1023,"
-  "'default':'300'"
-  "},"
-  "{"
-  "'name':'moveTimeout',"
-  "'label':'Movement timeout (s)',"
-  "'type':"+String(INPUTNUMBER)+","
-  "'min':1,'max':10000,"
-  "'default':'60'"
-  "},"
-  "{"
-  "'name':'sweepType',"
-  "'label':'Sweep',"
-  "'type':"+String(INPUTSELECT)+","
-  "'options':["
-  "{'v':'sweep1','l':'Normal'},"
-  "{'v':'sweep2','l':'Pastel'}],"
-  "'default':'sweep1'"
-  "},"
-  "{"
-  "'name':'sweepDelay',"
-  "'label':'Sweep delay (ms)',"
-  "'type':"+String(INPUTNUMBER)+","
-  "'min':1,'max':400,"
-  "'default':'20'"
-  "},"
-  "{"
-  "'name':'mqttHost',"
-  "'label':'MQTT hostname/ip',"
-  "'type':"+String(INPUTTEXT)+","
-  "'default':'192.168.0.180'"
-  "},"
-  "{"
-  "'name':'mqttPort',"
-  "'label':'MQTT port',"
-  "'type':"+String(INPUTNUMBER)+","
-  "'min':1,'max':65535,"
-  "'default':'1883'"
-  "}"
-  "]";
-
-// end WebConfig -------------------------------------------------------------------
 
 // begin setup ---------------------------------------------------------------------
 
@@ -144,12 +96,6 @@ void setupWifi()
   Serial.println(WiFi.localIP());
 }
 
-void setupConfig()
-{
-  config.setDescription(configParams);
-  config.readConfig();  
-}
-
 void setupHttpServer() 
 {
   server.on("/", httpHandleRoot);  
@@ -157,18 +103,13 @@ void setupHttpServer()
   server.on("/humidity", httpHandleHumidity);
   server.on("/pressure", httpHandlePressure);
   server.on("/led", httpHandleLed);
-  server.on("/config", httpHandleConfig);
   server.begin();
   Serial.println("HTTP server started");
 }
 
 void setupMqtt()
 {
-  Serial.print("Setting up MQTT host=");
-  Serial.print(config.getValue("mqttHost"));
-  Serial.print(" port=");
-  Serial.println(config.getInt("mqttPort"));
-  mqttClient.setServer(config.getValue("mqttHost"), config.getInt("mqttPort"));
+  mqttClient.setServer("192.168.0.180", 1883);
   mqttClient.setCallback(OnMqttMessageReceived);
   reconnectMqtt();
 }
@@ -177,7 +118,7 @@ boolean reconnectMqtt()
 {
   if (mqttClient.connect(DEVICE_NAME)) {
     Serial.println("MQTT connected");
-    mqttClient.subscribe("lights/slk2/night/rgb");
+    mqttClient.subscribe(DEFAULT_MQTT_TOPIC_RGB);
   }
   return mqttClient.connected();
 }
@@ -186,7 +127,7 @@ void setup()
 {
   setupIO();
   setupWifi();
-  setupConfig();
+  //setupConfig();
   setupHttpServer();
   setupMqtt();
   setLed(0, 0, 0);
@@ -243,15 +184,6 @@ void httpHandleRoot() {
          map(lastHumidity, 0, 100, 0, 1023));  
     */
   server.send(200, "text/html", createHTML(lastTemperature, lastHumidity, lastPressure)); 
-}
-
-void httpHandleConfig() 
-{
-  config.handleFormRequest(&server);
-  if (server.hasArg("SAVE")) 
-  {
-    onConfigurationChanged();
-  }  
 }
 
 void httpHandleTemperature() {
@@ -320,26 +252,6 @@ void mqttLoop()
   }  
 }
 
-void onConfigurationChanged()
-{
-  Serial.println("Configuration was updated.");
-  Serial.print("Movement timeout: ");
-  Serial.print(config.getInt("moveTimeout"));
-  Serial.println("s");
-  Serial.print("Light threshold: ");
-  Serial.println(config.getInt("lightThreshold"));
-  Serial.print("Sweep type: ");
-  Serial.println(config.getString("sweepType"));
-  Serial.print("Sweep delay: ");
-  Serial.println(config.getInt("sweepDelay"));
-  Serial.print("MQTT host: ");
-  Serial.println(config.getString("mqttHost"));
-  Serial.print("MQTT port: ");
-  Serial.println(config.getInt("mqttPort"));
-
-  evaluateTurnLedOnOrOff();
-}
-
 void readBme()
 {
   if (lastBmeReadTime == 0 || millis() - lastBmeReadTime > 60000)
@@ -393,16 +305,16 @@ void onBmeValuesChanged()
 {
   char buf[16];
   sprintf(buf, "%.2f", lastTemperature);
-  mqttClient.publish("sensors/slk2/env/temperature", buf);
+  mqttClient.publish(concat(DEFAULT_MQTT_BASE, "env/temperature"), buf);
   sprintf(buf, "%.2f", lastHumidity);
-  mqttClient.publish("sensors/slk2/env/humidity", buf);
+  mqttClient.publish(concat(DEFAULT_MQTT_BASE, "env/humidity"), buf);
   sprintf(buf, "%.2f", lastPressure);
-  mqttClient.publish("sensors/slk2/env/pressure", buf);
+  mqttClient.publish(concat(DEFAULT_MQTT_BASE, "env/pressure"), buf);
 }
 
 void onLightValueChanged()
 {
-  boolean newDarkness = lastLightValue < config.getInt("lightThreshold");
+  boolean newDarkness = lastLightValue < 800/*config.getInt("lightThreshold")*/;
 
   if (newDarkness != darkness)
   {
@@ -418,17 +330,17 @@ void onMovementDetected()
   Serial.println("Movement detected");
   presence = true;
   evaluateTurnLedOnOrOff();
-  mqttClient.publish("sensors/slk2/presence", "true");  
+  mqttClient.publish(concat(DEFAULT_MQTT_BASE, "presence"), "true");  
 }
 
 void onNoMovementDetected()
 {  
-  mqttClient.publish("sensors/slk2/presence", "false");  
+  mqttClient.publish(concat(DEFAULT_MQTT_BASE, "presence"), "false");  
 }
 
 void checkPresenceTimeout()
 {  
-  if (presence && millis() - lastMovementTime > config.getInt("moveTimeout") * 1000)
+  if (presence && millis() - lastMovementTime > /*config.getInt("moveTimeout")*/ 60 * 1000)
   {
     Serial.println("Presence timed out");
     presence = false;
@@ -453,7 +365,7 @@ int mapColor(String value)
 void rgbSweep()
 {
   if (!sweep || !ledOn) return;
-  if (millis() - sweepMillis < config.getInt("sweepDelay"))
+  if (millis() - sweepMillis < 5 /*config.getInt("sweepDelay")*/)
     return;
 
   sweepMillis = millis();
@@ -465,11 +377,11 @@ void rgbSweep()
     green = MAX_LED;
   }
 
-  String sweepType = config.getString("sweepType");
-  if (sweepType == String("sweep1"))
+  //String sweepType = config.getString("sweepType");
+  //if (sweepType == String("sweep1"))
     sweep1();
-  if (sweepType == String("sweep2"))
-    sweep2();
+  //if (sweepType == String("sweep2"))
+  //  sweep2();
 }
 
 // change 1 led color at a time: normal rgb sweep
@@ -568,7 +480,7 @@ void OnMqttMessageReceived(char* topic, byte* payload, unsigned int length)
   }
   Serial.println();
 
-  if (String(topic) == String("lights/slk2/night/rgb")) 
+  if (String(topic) == String(DEFAULT_MQTT_TOPIC_RGB)) 
   {
     int r, g, b;
     int result = sscanf((const char *)payload, "%d,%d,%d", &r, &g, &b);
