@@ -1,5 +1,6 @@
 
-#include <PubSubClient.h>#include <ESP8266WiFi.h>
+#include <PubSubClient.h>
+#include <ESP8266WiFi.h>
 #include <DNSServer.h>
 #include <ESP8266WebServer.h>
 #include <WiFiManager.h>
@@ -87,6 +88,19 @@ String configParams = "["
   "'type':"+String(INPUTNUMBER)+","
   "'min':1,'max':400,"
   "'default':'20'"
+  "},"
+  "{"
+  "'name':'mqttHost',"
+  "'label':'MQTT hostname/ip',"
+  "'type':"+String(INPUTTEXT)+","
+  "'default':'192.168.0.180'"
+  "},"
+  "{"
+  "'name':'mqttPort',"
+  "'label':'MQTT port',"
+  "'type':"+String(INPUTNUMBER)+","
+  "'min':1,'max':65535,"
+  "'default':'1883'"
   "}"
   "]";
 
@@ -150,7 +164,11 @@ void setupHttpServer()
 
 void setupMqtt()
 {
-  mqttClient.setServer("192.168.0.180", 1883);
+  Serial.print("Setting up MQTT host=");
+  Serial.print(config.getValue("mqttHost"));
+  Serial.print(" port=");
+  Serial.println(config.getInt("mqttPort"));
+  mqttClient.setServer(config.getValue("mqttHost"), config.getInt("mqttPort"));
   mqttClient.setCallback(OnMqttMessageReceived);
   reconnectMqtt();
 }
@@ -287,8 +305,12 @@ void mqttLoop()
     if (millis() - lastMqttReconnectAttempt > 5000) 
     {
       lastMqttReconnectAttempt = millis();
+      Serial.println("attempt MQTT reconnect");
       if (reconnectMqtt()) {
         lastMqttReconnectAttempt = 0;
+      }
+      else {
+        Serial.println("MQTT reconnect failed");
       }
     }    
   }
@@ -310,6 +332,10 @@ void onConfigurationChanged()
   Serial.println(config.getString("sweepType"));
   Serial.print("Sweep delay: ");
   Serial.println(config.getInt("sweepDelay"));
+  Serial.print("MQTT host: ");
+  Serial.println(config.getString("mqttHost"));
+  Serial.print("MQTT port: ");
+  Serial.println(config.getInt("mqttPort"));
 
   evaluateTurnLedOnOrOff();
 }
