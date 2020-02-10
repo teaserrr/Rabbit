@@ -6,6 +6,7 @@
 #include <WiFiManager.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
+#include <WiFiManagerConfig.h>
 
 /* ----------------------------------------------------------- */
 
@@ -33,7 +34,7 @@
 DNSServer dnsServer;
 ESP8266WebServer server(80);
 Adafruit_BME280 bme;
-//WebConfig config;
+WiFiManagerConfig config;
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 
@@ -86,9 +87,17 @@ void setupIO()
   Serial.println("BME280 ok");
 }
 
+void setupConfigParameters()
+{
+  config.addParameter("mqttHost", "MQTT host name or ip", "192.168.0.180", 255);
+  config.addParameter("mqttPort", "MQTT port", "1833", 5);
+}
+
 void setupWifi() 
 {
   WiFiManager wifiManager;
+  config.init(wifiManager);
+  
   wifiManager.autoConnect();
   Serial.print("Connected to ");
   Serial.println(WiFi.SSID());
@@ -109,7 +118,11 @@ void setupHttpServer()
 
 void setupMqtt()
 {
-  mqttClient.setServer("192.168.0.180", 1883);
+  Serial.print("Set MQTT server: ");
+  Serial.print(config.getValue("mqttHost"));
+  Serial.print(" port: ");
+  Serial.println(config.getIntValue("mqttPort"));
+  mqttClient.setServer(config.getValue("mqttHost"), config.getIntValue("mqttPort"));
   mqttClient.setCallback(OnMqttMessageReceived);
   reconnectMqtt();
 }
@@ -126,8 +139,8 @@ boolean reconnectMqtt()
 void setup() 
 {
   setupIO();
+  setupConfigParameters();
   setupWifi();
-  //setupConfig();
   setupHttpServer();
   setupMqtt();
   setLed(0, 0, 0);
