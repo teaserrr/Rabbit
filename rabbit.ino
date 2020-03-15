@@ -1,4 +1,3 @@
-
 #include <PubSubClient.h>
 #include <ESP8266WiFi.h>
 #include <DNSServer.h>
@@ -10,15 +9,23 @@
 
 /* ----------------------------------------------------------- */
 
-//#define PIN_LED_RED   16 // D0
-//#define PIN_LED_GREEN  0 // D3
-//#define PIN_LED_BLUE   2 // D4
-//#define PIN_RCWL_0516 14 // D5
-#define PIN_LED_RED   16 // D0
-#define PIN_LED_GREEN 14 // D5
-#define PIN_LED_BLUE  12 // D6
-#define PIN_RCWL_0516  0 // D3
-#define PIN_LDR       A0
+#define WEMOS_D1
+//#define NODEMCU
+
+#if defined(NODEMCU)
+  #define PIN_LED_RED   16 // D0
+  #define PIN_LED_GREEN  0 // D3
+  #define PIN_LED_BLUE   2 // D4
+  #define PIN_RCWL_0516 14 // D5
+  #define PIN_LDR       17 // A0
+  #define PIN_CONFIG    16 // D0
+#elif defined(WEMOS_D1)
+  #define PIN_LED_RED   16 // D0
+  #define PIN_LED_GREEN 14 // D5
+  #define PIN_LED_BLUE  12 // D6
+  #define PIN_RCWL_0516 13 // D7
+  #define PIN_LDR       17 // A0
+#endif
 
 #define S_RED 1
 #define S_GREEN 2
@@ -26,8 +33,11 @@
 #define MAX_LED 1023
 
 #define DEVICE_NAME  "ESP-Rabbit"
-#define DEFAULT_MQTT_TOPIC_RGB "lights/slk2/night/rgb"
-#define DEFAULT_MQTT_BASE "sensors/slk2/"
+#define ROOM_CODE "slk2"
+#define DEFAULT_MQTT_TOPIC_RGB "lights/" ROOM_CODE "/night/rgb"
+#define DEFAULT_MQTT_TOPIC_THRESHOLD "lights/" ROOM_CODE "/night/threshold"
+#define DEFAULT_MQTT_TOPIC_TIMEOUT "lights/" ROOM_CODE "/night/timeout"
+#define DEFAULT_MQTT_BASE "sensors/" ROOM_CODE "/"
 #define concat(first, second) first second
 
 
@@ -43,6 +53,8 @@ bool presence = false;
 bool darkness = false;
 int lastLightValue = 0;
 int currentStaticColor = S_BLUE;
+int lightThreshold = 400;
+int presenceTimeout = 1800;
 float lastTemperature = 0.0;
 float lastHumidity = 0.0;
 float lastPressure = 0.0;
@@ -67,7 +79,9 @@ void setupIO()
   pinMode(PIN_LED_GREEN, OUTPUT);
   pinMode(PIN_LED_BLUE, OUTPUT);
   pinMode(PIN_RCWL_0516, INPUT);
+  digitalWrite(PIN_RCWL_0516, LOW);
   pinMode(PIN_LDR, INPUT);
+  pinMode(PIN_CONFIG, INPUT);
 
   Serial.begin(115200);
   Serial.println();
@@ -89,8 +103,9 @@ void setupIO()
 
 void setupConfigParameters()
 {
+  config.addParameter("test", "test parameter", "testValue", 255);
   config.addParameter("mqttHost", "MQTT host name or ip", "192.168.0.180", 255);
-  config.addParameter("mqttPort", "MQTT port", "1833", 5);
+  config.addParameter("mqttPort", "MQTT port", "1883", 5);
 }
 
 void setupWifi() 
@@ -98,7 +113,19 @@ void setupWifi()
   WiFiManager wifiManager;
   config.init(wifiManager);
   
-  wifiManager.autoConnect();
+  if (digitalRead(PIN_CONFIG) == LOW) 
+  {
+    if (!wifiManager.startConfigPortal("OnDemandAP")) 
+    {
+      Serial.println("failed to start Config Portal");
+      delay(3000);
+      ESP.reset();
+    }
+  }
+  else
+  {
+    wifiManager.autoConnect();
+  }
   Serial.print("Connected to ");
   Serial.println(WiFi.SSID());
   Serial.print("IP address: ");
@@ -121,19 +148,10 @@ void setupMqtt()
   Serial.print("Set MQTT server: ");
   Serial.print(config.getValue("mqttHost"));
   Serial.print(" port: ");
-  Serial.println(config.getIntValue("mqttPort"));
+  Serial.println(config.getValue("mqttPort"));
+  //mqttClient.setServer("192.168.0.180", 1883);
   mqttClient.setServer(config.getValue("mqttHost"), config.getIntValue("mqttPort"));
   mqttClient.setCallback(OnMqttMessageReceived);
-  reconnectMqtt();
-}
-
-boolean reconnectMqtt() 
-{
-  if (mqttClient.connect(DEVICE_NAME)) {
-    Serial.println("MQTT connected");
-    mqttClient.subscribe(DEFAULT_MQTT_TOPIC_RGB);
-  }
-  return mqttClient.connected();
 }
 
 void setup() 
@@ -251,18 +269,29 @@ void mqttLoop()
     {
       lastMqttReconnectAttempt = millis();
       Serial.println("attempt MQTT reconnect");
-      if (reconnectMqtt()) {
+      if (reconnectMqtt()) 
+      {
         lastMqttReconnectAttempt = 0;
       }
-      else {
+      else 
+      {
         Serial.println("MQTT reconnect failed");
       }
-    }    
+    }
   }
-  else
-  {
-    mqttClient.loop();
-  }  
+  mqttClient.loop();
+}
+
+boolean reconnectMqtt() 
+{
+  if (mqttClient.connect(DEVICE_NAME)) {
+    Serial.println("MQTT connected");
+    mqttClient.subscribe(DEFAULT_MQTT_TOPIC_RGB);
+    mqttClient.subscribe(DEFAULT_MQTT_TOPIC_THRESHOLD);
+    mqttClient.subscribe(DEFAULT_MQTT_TOPIC_TIMEOUT);
+    return true;
+  }
+  return mqttClient.connected();
 }
 
 void readBme()
@@ -327,7 +356,7 @@ void onBmeValuesChanged()
 
 void onLightValueChanged()
 {
-  boolean newDarkness = lastLightValue < 800/*config.getInt("lightThreshold")*/;
+  boolean newDarkness = lastLightValue < lightThreshold;
 
   if (newDarkness != darkness)
   {
@@ -353,7 +382,7 @@ void onNoMovementDetected()
 
 void checkPresenceTimeout()
 {  
-  if (presence && millis() - lastMovementTime > /*config.getInt("moveTimeout")*/ 60 * 1000)
+  if (presence && millis() - lastMovementTime > presenceTimeout * 1000)
   {
     Serial.println("Presence timed out");
     presence = false;
@@ -363,7 +392,9 @@ void checkPresenceTimeout()
 
 void evaluateTurnLedOnOrOff()
 {
-  ledOn = presence & darkness;
+  // do not turn off again when it becomes lighter, this leads to blinking
+  if (darkness || !presence)
+    ledOn = presence;
   setLed(red, green, blue);
 }
 
@@ -493,6 +524,24 @@ void OnMqttMessageReceived(char* topic, byte* payload, unsigned int length)
   }
   Serial.println();
 
+  if (String(topic) == String(DEFAULT_MQTT_TOPIC_THRESHOLD)) 
+  {
+    int result = atoi((const char*)payload);
+    
+    Serial.print("Set light threshold to ");
+    Serial.println(result);
+    lightThreshold = result;
+    onLightValueChanged();
+  }
+  if (String(topic) == String(DEFAULT_MQTT_TOPIC_TIMEOUT)) 
+  {
+    int result = atoi((const char*)payload);
+    
+    Serial.print("Set light timeout to (s) ");
+    Serial.println(result);
+    presenceTimeout = result;
+    checkPresenceTimeout();
+  }
   if (String(topic) == String(DEFAULT_MQTT_TOPIC_RGB)) 
   {
     int r, g, b;
