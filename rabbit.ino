@@ -13,7 +13,7 @@
 //#define NODEMCU
 
 #if defined(NODEMCU)
-  #define PIN_LED_RED   16 // D0
+  #define PIN_LED_RED   12 // D6
   #define PIN_LED_GREEN  0 // D3
   #define PIN_LED_BLUE   2 // D4
   #define PIN_RCWL_0516 14 // D5
@@ -33,13 +33,27 @@
 #define MAX_LED 1023
 
 #define DEVICE_NAME  "ESP-Rabbit"
+//#define DEVICE_NAME  "ESP-Test"
 #define ROOM_CODE "slk2"
-#define DEFAULT_MQTT_TOPIC_RGB "lights/" ROOM_CODE "/night/rgb"
-#define DEFAULT_MQTT_TOPIC_THRESHOLD "lights/" ROOM_CODE "/night/threshold"
-#define DEFAULT_MQTT_TOPIC_TIMEOUT "lights/" ROOM_CODE "/night/timeout"
-#define DEFAULT_MQTT_BASE "sensors/" ROOM_CODE "/"
-#define concat(first, second) first second
+//#define ROOM_CODE "bur"
 
+#define concat(first, second) first second
+#define MQTT_PATH_LIGHTS "lights/"
+#define MQTT_PATH_SENSORS "sensors/"
+#define MQTT_TOPIC_RGB concat(MQTT_PATH_LIGHTS, ROOM_CODE) "/night/rgb"
+#define MQTT_TOPIC_THRESHOLD concat(MQTT_PATH_LIGHTS, ROOM_CODE) "/night/threshold"
+#define MQTT_TOPIC_TIMEOUT concat(MQTT_PATH_LIGHTS, ROOM_CODE) "/night/timeout"
+#define MQTT_TOPIC_STATE concat(MQTT_PATH_LIGHTS, ROOM_CODE) "/night/state"
+#define MQTT_TOPIC_SWITCH concat(MQTT_PATH_LIGHTS, ROOM_CODE) "/night/switch"
+#define MQTT_SENSORS_BASE concat(MQTT_PATH_SENSORS, ROOM_CODE) "/"
+
+#define CONFIG_ID_MQTT_HOST "mqttHost"
+#define CONFIG_ID_MQTT_PORT "mqttPort"
+#define CONFIG_ID_PRESENCE_TIMEOUT "presenceTimeout"
+#define CONFIG_ID_LIGHT_TRESHOLD "lightThreshold"
+
+#define ON "ON"
+#define OFF "OFF"
 
 DNSServer dnsServer;
 ESP8266WebServer server(80);
@@ -53,8 +67,6 @@ bool presence = false;
 bool darkness = false;
 int lastLightValue = 0;
 int currentStaticColor = S_BLUE;
-int lightThreshold = 400;
-int presenceTimeout = 1800;
 float lastTemperature = 0.0;
 float lastHumidity = 0.0;
 float lastPressure = 0.0;
@@ -103,9 +115,10 @@ void setupIO()
 
 void setupConfigParameters()
 {
-  config.addParameter("test", "test parameter", "testValue", 255);
-  config.addParameter("mqttHost", "MQTT host name or ip", "192.168.0.180", 255);
-  config.addParameter("mqttPort", "MQTT port", "1883", 5);
+  config.addParameter(CONFIG_ID_MQTT_HOST, "MQTT host name or ip", "192.168.0.180", 255);
+  config.addParameter(CONFIG_ID_MQTT_PORT, "MQTT port", "1883", 5);
+  config.addParameter(CONFIG_ID_PRESENCE_TIMEOUT, "Presence timeout (s)", "1800", 8);
+  config.addParameter(CONFIG_ID_LIGHT_TRESHOLD, "Light treshold (0-1024)", "400", 5);
 }
 
 void setupWifi() 
@@ -142,10 +155,10 @@ void setupHttpServer()
 void setupMqtt()
 {
   Serial.print("Set MQTT server: ");
-  Serial.print(config.getValue("mqttHost"));
+  Serial.print(config.getValue(CONFIG_ID_MQTT_HOST));
   Serial.print(" port: ");
-  Serial.println(config.getValue("mqttPort"));
-  mqttClient.setServer(config.getValue("mqttHost"), config.getIntValue("mqttPort"));
+  Serial.println(config.getValue(CONFIG_ID_MQTT_PORT));
+  mqttClient.setServer(config.getValue(CONFIG_ID_MQTT_HOST), config.getIntValue(CONFIG_ID_MQTT_PORT));
   mqttClient.setCallback(OnMqttMessageReceived);
 }
 
@@ -253,9 +266,10 @@ boolean reconnectMqtt()
 {
   if (mqttClient.connect(DEVICE_NAME)) {
     Serial.println("MQTT connected");
-    mqttClient.subscribe(DEFAULT_MQTT_TOPIC_RGB);
-    mqttClient.subscribe(DEFAULT_MQTT_TOPIC_THRESHOLD);
-    mqttClient.subscribe(DEFAULT_MQTT_TOPIC_TIMEOUT);
+    mqttClient.subscribe(MQTT_TOPIC_RGB);
+    mqttClient.subscribe(MQTT_TOPIC_THRESHOLD);
+    mqttClient.subscribe(MQTT_TOPIC_TIMEOUT);
+    mqttClient.subscribe(MQTT_TOPIC_SWITCH);
     return true;
   }
   return mqttClient.connected();
@@ -314,16 +328,16 @@ void onBmeValuesChanged()
 {
   char buf[16];
   sprintf(buf, "%.2f", lastTemperature);
-  mqttClient.publish(concat(DEFAULT_MQTT_BASE, "env/temperature"), buf);
+  mqttClient.publish(concat(MQTT_SENSORS_BASE, "env/temperature"), buf);
   sprintf(buf, "%.2f", lastHumidity);
-  mqttClient.publish(concat(DEFAULT_MQTT_BASE, "env/humidity"), buf);
+  mqttClient.publish(concat(MQTT_SENSORS_BASE, "env/humidity"), buf);
   sprintf(buf, "%.2f", lastPressure);
-  mqttClient.publish(concat(DEFAULT_MQTT_BASE, "env/pressure"), buf);
+  mqttClient.publish(concat(MQTT_SENSORS_BASE, "env/pressure"), buf);
 }
 
 void onLightValueChanged()
 {
-  boolean newDarkness = lastLightValue < lightThreshold;
+  boolean newDarkness = lastLightValue < config.getIntValue(CONFIG_ID_LIGHT_TRESHOLD);
 
   if (newDarkness != darkness)
   {
@@ -338,18 +352,18 @@ void onMovementDetected()
 {
   Serial.println("Movement detected");
   presence = true;
+  mqttClient.publish(concat(MQTT_SENSORS_BASE, "presence"), "true");  
   evaluateTurnLedOnOrOff();
-  mqttClient.publish(concat(DEFAULT_MQTT_BASE, "presence"), "true");  
 }
 
 void onNoMovementDetected()
 {  
-  mqttClient.publish(concat(DEFAULT_MQTT_BASE, "presence"), "false");  
+  mqttClient.publish(concat(MQTT_SENSORS_BASE, "presence"), "false");  
 }
 
 void checkPresenceTimeout()
 {  
-  if (presence && millis() - lastMovementTime > presenceTimeout * 1000)
+  if (presence && millis() - lastMovementTime > config.getIntValue(CONFIG_ID_PRESENCE_TIMEOUT) * 1000)
   {
     Serial.println("Presence timed out");
     presence = false;
@@ -361,8 +375,9 @@ void evaluateTurnLedOnOrOff()
 {
   // do not turn off again when it becomes lighter, this leads to blinking
   if (darkness || !presence)
-    ledOn = presence;
-  setLed(red, green, blue);
+  {
+    changeLedState(presence);
+  }
 }
 
 int mapColor(String value)
@@ -491,25 +506,46 @@ void OnMqttMessageReceived(char* topic, byte* payload, unsigned int length)
   }
   Serial.println();
 
-  if (String(topic) == String(DEFAULT_MQTT_TOPIC_THRESHOLD)) 
+  if (String(topic) == String(MQTT_TOPIC_THRESHOLD)) 
   {
     int result = atoi((const char*)payload);
+    if (result < 0 || result > 1024)
+      return;
     
     Serial.print("Set light threshold to ");
     Serial.println(result);
-    lightThreshold = result;
+    config.setValue(CONFIG_ID_LIGHT_TRESHOLD, result);
+    config.saveConfiguration();
     onLightValueChanged();
   }
-  if (String(topic) == String(DEFAULT_MQTT_TOPIC_TIMEOUT)) 
+  if (String(topic) == String(MQTT_TOPIC_TIMEOUT)) 
   {
     int result = atoi((const char*)payload);
-    
+    if (result < 1 || result > 999999)
+      return;
+
     Serial.print("Set light timeout to (s) ");
     Serial.println(result);
-    presenceTimeout = result;
+    config.setValue(CONFIG_ID_PRESENCE_TIMEOUT, result);
+    config.saveConfiguration();
     checkPresenceTimeout();
   }
-  if (String(topic) == String(DEFAULT_MQTT_TOPIC_RGB)) 
+  if (String(topic) == String(MQTT_TOPIC_SWITCH)) 
+  {
+    if (length == 2 && strncmp(ON, (const char*)payload, 2) == 0)
+    {
+      Serial.println("Turn on light");
+      changeLedState(true);
+      return;
+    }
+    if (length == 3 && strncmp(OFF, (const char*)payload, 3) == 0)
+    {
+      Serial.println("Turn off light");
+      changeLedState(false);
+      return;
+    }
+  }
+  if (String(topic) == String(MQTT_TOPIC_RGB)) 
   {
     int r, g, b;
     int result = sscanf((const char *)payload, "%d,%d,%d", &r, &g, &b);
@@ -517,15 +553,24 @@ void OnMqttMessageReceived(char* topic, byte* payload, unsigned int length)
     { 
       Serial.println("Set RGB value");
       sweep = false;
-      ledOn = true;
       red = map(r, 0, 255, 0, MAX_LED);
       green = map(g, 0, 255, 0, MAX_LED);
       blue = map(b, 0, 255, 0, MAX_LED);
-      setLed(red, green, blue);
+      changeLedState(true);
     }
     else
     {
       sweep = true;
     }
   }
+}
+
+void changeLedState(bool onOffState)
+{
+  if (ledOn == onOffState)
+    return;
+  
+  ledOn = onOffState;
+  setLed(red, green, blue);
+  mqttClient.publish(MQTT_TOPIC_STATE, onOffState ? ON : OFF);  
 }
