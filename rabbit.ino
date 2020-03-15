@@ -134,11 +134,7 @@ void setupWifi()
 
 void setupHttpServer() 
 {
-  server.on("/", httpHandleRoot);  
-  server.on("/temperature", httpHandleTemperature);  
-  server.on("/humidity", httpHandleHumidity);
-  server.on("/pressure", httpHandlePressure);
-  server.on("/led", httpHandleLed);
+  server.on("/", httpHandleRoot); 
   server.begin();
   Serial.println("HTTP server started");
 }
@@ -149,7 +145,6 @@ void setupMqtt()
   Serial.print(config.getValue("mqttHost"));
   Serial.print(" port: ");
   Serial.println(config.getValue("mqttPort"));
-  //mqttClient.setServer("192.168.0.180", 1883);
   mqttClient.setServer(config.getValue("mqttHost"), config.getIntValue("mqttPort"));
   mqttClient.setCallback(OnMqttMessageReceived);
 }
@@ -169,10 +164,13 @@ void setup()
 
 // begin HTTP ----------------------------------------------------------------------
 
-String createHTML(float temperature, float humidity, float pressure){
+String createHTML()
+{
   String ptr = "<!DOCTYPE html> <html>\n";
   ptr += "<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\">\n";
-  ptr += "<title>ESP8266 Rabbit</title>\n";
+  ptr += "<title>";
+  ptr += DEVICE_NAME;
+  ptr += "</title>\n";
   ptr += "<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center;}\n";
   ptr += "body{margin-top: 50px;} h1 {color: #444444;margin: 50px auto 30px;}\n";
   ptr += "p {font-size: 24px;color: #444444;margin-bottom: 10px;}\n";
@@ -180,15 +178,17 @@ String createHTML(float temperature, float humidity, float pressure){
   ptr += "</head>\n";
   ptr += "<body>\n";
   ptr += "<div id=\"webpage\">\n";
-  ptr += "<h1>ESP8266 Rabbit</h1>\n";
+  ptr += "<h1>";
+  ptr += DEVICE_NAME;
+  ptr += "</h1>\n";
   ptr += "<p>Temperature: ";
-  ptr += temperature;
+  ptr += lastTemperature;
   ptr += "&deg;C</p>";
   ptr += "<p>Humidity: ";
-  ptr += humidity;
+  ptr += lastHumidity;
   ptr += "%</p>";
   ptr += "<p>Pressure: ";
-  ptr += pressure;
+  ptr += lastPressure;
   ptr += "hPa</p>";
   ptr += "<p>Light value: ";
   ptr += lastLightValue;
@@ -205,45 +205,12 @@ String createHTML(float temperature, float humidity, float pressure){
   return ptr;
 }
 
-void httpHandleRoot() {
+void httpHandleRoot() 
+{
   Serial.println("HTTP handle root");
   
   readBme();
-/*
-  setLed(map(lastTemperature, 0, 35, 0, 1023),
-         map(lastPressure, 1000, 1050, 0, 1023),
-         map(lastHumidity, 0, 100, 0, 1023));  
-    */
-  server.send(200, "text/html", createHTML(lastTemperature, lastHumidity, lastPressure)); 
-}
-
-void httpHandleTemperature() {
-  readBme();
-  server.send(200, "text/plain", String(lastTemperature, 1));
-}
-
-void httpHandleHumidity() {
-  readBme();
-  server.send(200, "text/plain", String(lastHumidity, 1));
-}
-
-void httpHandlePressure() {
-  readBme();
-  server.send(200, "text/plain", String(lastPressure, 1));
-}
-
-void httpHandleLed() {
-
-  if(server.args() > 0) {
-    
-    String red = server.arg("r");
-    String green = server.arg("g");
-    String blue = server.arg("b");
-
-    setLed(mapColor(red), mapColor(green), mapColor(blue));
-    sweep = false;
-  }
-  server.send(200, "text/plain", "ok");
+  server.send(200, "text/html", createHTML()); 
 }
 
 // end HTTP ----------------------------------------------------------------------
