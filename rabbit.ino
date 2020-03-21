@@ -38,22 +38,29 @@
 //#define ROOM_CODE "bur"
 
 #define concat(first, second) first second
-#define MQTT_PATH_LIGHTS "lights/"
-#define MQTT_PATH_SENSORS "sensors/"
-#define MQTT_TOPIC_RGB concat(MQTT_PATH_LIGHTS, ROOM_CODE) "/night/rgb"
-#define MQTT_TOPIC_THRESHOLD concat(MQTT_PATH_LIGHTS, ROOM_CODE) "/night/threshold"
-#define MQTT_TOPIC_TIMEOUT concat(MQTT_PATH_LIGHTS, ROOM_CODE) "/night/timeout"
-#define MQTT_TOPIC_STATE concat(MQTT_PATH_LIGHTS, ROOM_CODE) "/night/state"
-#define MQTT_TOPIC_SWITCH concat(MQTT_PATH_LIGHTS, ROOM_CODE) "/night/switch"
-#define MQTT_SENSORS_BASE concat(MQTT_PATH_SENSORS, ROOM_CODE) "/"
+#define MQTT_PATH_LIGHTS "lights/night/"
+#define MQTT_SENSORS_BASE "sensors/" ROOM_CODE "/"
+#define MQTT_LIGHT_BASE "lights/" ROOM_CODE "/night/"
+#define MQTT_TOPIC_RGB MQTT_LIGHT_BASE "rgb"
+#define MQTT_TOPIC_THRESHOLD MQTT_LIGHT_BASE "threshold"
+#define MQTT_TOPIC_TIMEOUT MQTT_LIGHT_BASE "timeout"
+#define MQTT_TOPIC_STATE MQTT_LIGHT_BASE "state"
+#define MQTT_TOPIC_SWITCH MQTT_LIGHT_BASE "switch"
+#define MQTT_TOPIC_SWEEP_MODE MQTT_LIGHT_BASE "sweepMode"
+#define MQTT_TOPIC_SWEEP_DELAY MQTT_LIGHT_BASE "sweepDelay"
 
 #define CONFIG_ID_MQTT_HOST "mqttHost"
 #define CONFIG_ID_MQTT_PORT "mqttPort"
 #define CONFIG_ID_PRESENCE_TIMEOUT "presenceTimeout"
 #define CONFIG_ID_LIGHT_TRESHOLD "lightThreshold"
+#define CONFIG_ID_SWEEP_MODE "sweepMode"
+#define CONFIG_ID_SWEEP_DELAY "sweepDelay"
 
 #define ON "ON"
 #define OFF "OFF"
+#define MODE_SWEEP1 "SWEEP1"
+#define MODE_SWEEP2 "SWEEP2"
+#define MODE_STATIC "STATIC"
 
 DNSServer dnsServer;
 ESP8266WebServer server(80);
@@ -93,7 +100,9 @@ void setupIO()
   pinMode(PIN_RCWL_0516, INPUT);
   digitalWrite(PIN_RCWL_0516, LOW);
   pinMode(PIN_LDR, INPUT);
+#if defined(NODEMCU)
   pinMode(PIN_CONFIG, INPUT);
+#endif
 
   Serial.begin(115200);
   Serial.println();
@@ -119,13 +128,15 @@ void setupConfigParameters()
   config.addParameter(CONFIG_ID_MQTT_PORT, "MQTT port", "1883", 5);
   config.addParameter(CONFIG_ID_PRESENCE_TIMEOUT, "Presence timeout (s)", "1800", 8);
   config.addParameter(CONFIG_ID_LIGHT_TRESHOLD, "Light treshold (0-1024)", "400", 5);
+  config.addParameter(CONFIG_ID_SWEEP_MODE, "Sweep mode", MODE_SWEEP1, strlen(MODE_SWEEP1)+1);
+  config.addParameter(CONFIG_ID_SWEEP_DELAY, "Sweep delay (ms)", "5", 8);
 }
 
 void setupWifi() 
 {
   WiFiManager wifiManager;
   config.init(wifiManager);
-  
+#if defined(NODEMCU) 
   if (digitalRead(PIN_CONFIG) == LOW) 
   {
     if (!wifiManager.startConfigPortal("OnDemandAP")) 
@@ -136,6 +147,7 @@ void setupWifi()
     }
   }
   else
+#endif
   {
     wifiManager.autoConnect();
   }
@@ -270,6 +282,8 @@ boolean reconnectMqtt()
     mqttClient.subscribe(MQTT_TOPIC_THRESHOLD);
     mqttClient.subscribe(MQTT_TOPIC_TIMEOUT);
     mqttClient.subscribe(MQTT_TOPIC_SWITCH);
+    mqttClient.subscribe(MQTT_TOPIC_SWEEP_MODE);
+    mqttClient.subscribe(MQTT_TOPIC_SWEEP_DELAY);
     return true;
   }
   return mqttClient.connected();
@@ -391,7 +405,7 @@ int mapColor(String value)
 void rgbSweep()
 {
   if (!sweep || !ledOn) return;
-  if (millis() - sweepMillis < 5 /*config.getInt("sweepDelay")*/)
+  if (millis() - sweepMillis < config.getIntValue(CONFIG_ID_SWEEP_DELAY))
     return;
 
   sweepMillis = millis();
@@ -403,11 +417,11 @@ void rgbSweep()
     green = MAX_LED;
   }
 
-  //String sweepType = config.getString("sweepType");
-  //if (sweepType == String("sweep1"))
+  String sweepMode = config.getValue("sweepMode");
+  if (sweepMode == String(MODE_SWEEP1))
     sweep1();
-  //if (sweepType == String("sweep2"))
-  //  sweep2();
+  if (sweepMode == String(MODE_SWEEP2))
+    sweep2();
 }
 
 // change 1 led color at a time: normal rgb sweep
@@ -500,6 +514,8 @@ void OnMqttMessageReceived(char* topic, byte* payload, unsigned int length)
 {
   Serial.print("Message arrived [");
   Serial.print(topic);
+  Serial.print("] [length=");
+  Serial.print(length);
   Serial.print("] ");
   for (int i = 0; i < length; i++) {
     Serial.print((char)payload[i]);
@@ -532,21 +548,45 @@ void OnMqttMessageReceived(char* topic, byte* payload, unsigned int length)
   }
   if (String(topic) == String(MQTT_TOPIC_SWITCH)) 
   {
-    if (length == 2 && strncmp(ON, (const char*)payload, 2) == 0)
+    if (startsWith((const char*)payload, length, ON))
     {
       Serial.println("Turn on light");
       changeLedState(true);
       return;
     }
-    if (length == 3 && strncmp(OFF, (const char*)payload, 3) == 0)
+    if (startsWith((const char*)payload, length, OFF))
     {
       Serial.println("Turn off light");
       changeLedState(false);
       return;
     }
   }
+  if (String(topic) == String(MQTT_TOPIC_SWEEP_MODE)) 
+  {
+    // expecting one of: SWEEP1 SWEEP2 STATIC
+    if (startsWith((const char*)payload, length, MODE_SWEEP1))
+      setSweepMode(MODE_SWEEP1);
+    else if (startsWith((const char*)payload, length, MODE_SWEEP2))
+      setSweepMode(MODE_SWEEP2);
+    else if (startsWith((const char*)payload, length, MODE_STATIC))
+      setSweepMode(MODE_STATIC);
+    return;
+  }
+  if (String(topic) == String(MQTT_TOPIC_SWEEP_DELAY)) 
+  {
+    int result = atoi((const char*)payload);
+    if (result < 1 || result > 999999)
+      return;
+
+    Serial.print("Set sweep delay to (ms) ");
+    Serial.println(result);
+    config.setValue(CONFIG_ID_SWEEP_DELAY, result);
+    config.saveConfiguration();
+    return;
+  }
   if (String(topic) == String(MQTT_TOPIC_RGB)) 
   {
+    // expecting a string with format: rrr,ggg,bbb
     int r, g, b;
     int result = sscanf((const char *)payload, "%d,%d,%d", &r, &g, &b);
     if (result > 0 && (r > 0 || g > 0 || b > 0))
@@ -563,6 +603,22 @@ void OnMqttMessageReceived(char* topic, byte* payload, unsigned int length)
       sweep = true;
     }
   }
+}
+
+void setSweepMode(const char* sweepMode)
+{
+  Serial.print("Set sweep mode ");
+  Serial.println(sweepMode);
+  config.setValue(CONFIG_ID_SWEEP_MODE, sweepMode);
+  config.saveConfiguration();
+  sweep = strcmp(sweepMode, MODE_STATIC) != 0;
+}
+
+boolean startsWith(const char* str, int length, const char* token)
+{
+  if (length < strlen(token))
+    return false;
+  return strncmp(str, token, length) == 0;
 }
 
 void changeLedState(bool onOffState)
