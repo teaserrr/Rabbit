@@ -37,9 +37,8 @@
 #define ROOM_CODE "slk2"
 //#define ROOM_CODE "bur"
 
-#define concat(first, second) first second
-#define MQTT_PATH_LIGHTS "lights/night/"
 #define MQTT_SENSORS_BASE "sensors/" ROOM_CODE "/"
+#define MQTT_ENVIRONMENT_BASE MQTT_SENSORS_BASE "env/"
 #define MQTT_LIGHT_BASE "lights/" ROOM_CODE "/night/"
 #define MQTT_TOPIC_RGB MQTT_LIGHT_BASE "rgb"
 #define MQTT_TOPIC_THRESHOLD MQTT_LIGHT_BASE "threshold"
@@ -48,13 +47,16 @@
 #define MQTT_TOPIC_SWITCH MQTT_LIGHT_BASE "switch"
 #define MQTT_TOPIC_SWEEP_MODE MQTT_LIGHT_BASE "sweepMode"
 #define MQTT_TOPIC_SWEEP_DELAY MQTT_LIGHT_BASE "sweepDelay"
+#define MQTT_TOPIC_PRESENCE MQTT_SENSORS_BASE "presence"
+#define MQTT_TOPIC_SENSITIVITY MQTT_SENSORS_BASE "sensitivity"
 
 #define CONFIG_ID_MQTT_HOST "mqttHost"
 #define CONFIG_ID_MQTT_PORT "mqttPort"
-#define CONFIG_ID_PRESENCE_TIMEOUT "presenceTimeout"
+#define CONFIG_ID_LIGHT_TIMEOUT "presenceTimeout"
 #define CONFIG_ID_LIGHT_TRESHOLD "lightThreshold"
 #define CONFIG_ID_SWEEP_MODE "sweepMode"
 #define CONFIG_ID_SWEEP_DELAY "sweepDelay"
+#define CONFIG_ID_SENSITIVITY "sensitivity"
 
 #define ON "ON"
 #define OFF "OFF"
@@ -69,19 +71,24 @@ WiFiManagerConfig config;
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 
-bool lastMovement = false;
-bool presence = false;
 bool darkness = false;
 int lastLightValue = 0;
 int currentStaticColor = S_BLUE;
 float lastTemperature = 0.0;
 float lastHumidity = 0.0;
 float lastPressure = 0.0;
-unsigned long lastMovementTime = 0;
 unsigned long lastLightReadTime = 0;
 unsigned long lastBmeReadTime = 0;
 unsigned long sweepMillis = 0;
 unsigned long lastMqttReconnectAttempt = 0;
+
+bool lastMovementState = false;
+bool presence = false;
+int presenceDelay = 5000;
+int presenceAllowedOffTime = 2000;
+unsigned long lastTimeMovementOn = 0;
+unsigned long lastTimeMovementOff = 0;
+unsigned long lastTimePresenceOff = 0;
 
 int red = 0;
 int green = 0;
@@ -126,10 +133,11 @@ void setupConfigParameters()
 {
   config.addParameter(CONFIG_ID_MQTT_HOST, "MQTT host name or ip", "192.168.0.180", 255);
   config.addParameter(CONFIG_ID_MQTT_PORT, "MQTT port", "1883", 5);
-  config.addParameter(CONFIG_ID_PRESENCE_TIMEOUT, "Presence timeout (s)", "1800", 8);
+  config.addParameter(CONFIG_ID_LIGHT_TIMEOUT, "Light timeout (s)", "1800", 8);
   config.addParameter(CONFIG_ID_LIGHT_TRESHOLD, "Light treshold (0-1024)", "400", 5);
-  config.addParameter(CONFIG_ID_SWEEP_MODE, "Sweep mode", MODE_SWEEP1, strlen(MODE_SWEEP1)+1);
-  config.addParameter(CONFIG_ID_SWEEP_DELAY, "Sweep delay (ms)", "5", 8);
+  config.addParameter(CONFIG_ID_SWEEP_MODE, "RGB sweep mode", MODE_SWEEP1, strlen(MODE_SWEEP1)+1);
+  config.addParameter(CONFIG_ID_SWEEP_DELAY, "RGB sweep delay (ms)", "5", 8);
+  config.addParameter(CONFIG_ID_SENSITIVITY, "Presence detection sensitivity (1-10)", "5", 3);
 }
 
 void setupWifi() 
@@ -179,6 +187,7 @@ void setup()
   setupIO();
   setupConfigParameters();
   setupWifi();
+  OnConfigurationUpdated();
   setupHttpServer();
   setupMqtt();
   setLed(0, 0, 0);
@@ -243,7 +252,7 @@ void httpHandleRoot()
 void loop() 
 {  
   readBme();
-  checkMovement();
+  checkMovementDetectorState();
   readLightValue();
   server.handleClient();
   mqttLoop();
@@ -284,6 +293,7 @@ boolean reconnectMqtt()
     mqttClient.subscribe(MQTT_TOPIC_SWITCH);
     mqttClient.subscribe(MQTT_TOPIC_SWEEP_MODE);
     mqttClient.subscribe(MQTT_TOPIC_SWEEP_DELAY);
+    mqttClient.subscribe(MQTT_TOPIC_SENSITIVITY);
     return true;
   }
   return mqttClient.connected();
@@ -299,26 +309,6 @@ void readBme()
     lastPressure = bme.readPressure() / 100.0F;
     lastBmeReadTime = millis();
     onBmeValuesChanged();
-  }
-}
-
-void checkMovement()
-{
-  bool movement = digitalRead(PIN_RCWL_0516);
-  if (movement != lastMovement)
-  {
-    lastMovement = movement;
-    if (movement)
-      onMovementDetected();
-    else
-      onNoMovementDetected();
-      
-    lastMovementTime = millis();
-  }
-  
-  if (!movement)
-  {
-    checkPresenceTimeout();
   }
 }
 
@@ -342,11 +332,11 @@ void onBmeValuesChanged()
 {
   char buf[16];
   sprintf(buf, "%.2f", lastTemperature);
-  mqttClient.publish(concat(MQTT_SENSORS_BASE, "env/temperature"), buf);
+  mqttClient.publish(MQTT_ENVIRONMENT_BASE "temperature", buf);
   sprintf(buf, "%.2f", lastHumidity);
-  mqttClient.publish(concat(MQTT_SENSORS_BASE, "env/humidity"), buf);
+  mqttClient.publish(MQTT_ENVIRONMENT_BASE "humidity", buf);
   sprintf(buf, "%.2f", lastPressure);
-  mqttClient.publish(concat(MQTT_SENSORS_BASE, "env/pressure"), buf);
+  mqttClient.publish(MQTT_ENVIRONMENT_BASE "pressure", buf);
 }
 
 void onLightValueChanged()
@@ -358,40 +348,104 @@ void onLightValueChanged()
     Serial.print("Darkness ");
     Serial.println(newDarkness ? "on" : "off");
     darkness = newDarkness;
-    evaluateTurnLedOnOrOff();
+    if (darkness)
+      changeLedState(presence);
   }
+}
+
+void checkMovementDetectorState()
+{
+  bool movementState = digitalRead(PIN_RCWL_0516);
+  if (movementState != lastMovementState)
+  {
+    lastMovementState = movementState;
+    if (movementState)
+      onMovementDetected();
+    else
+      onNoMovementDetected();
+  }
+  
+  if (movementState)
+    checkPresence();
+  else
+    checkPresenceTimeout();
 }
 
 void onMovementDetected()
 {
-  Serial.println("Movement detected");
-  presence = true;
-  mqttClient.publish(concat(MQTT_SENSORS_BASE, "presence"), "true");  
-  evaluateTurnLedOnOrOff();
+  unsigned long now = millis();
+  Serial.print(millis());
+  Serial.println(" Movement detected");
+  if (lastTimeMovementOff > 0)
+  {
+    if (now - lastTimeMovementOff < presenceAllowedOffTime)
+    {
+      // off time was smaller than threshold, pretend it was on all the time
+      lastTimeMovementOff = 0;
+      return;
+    }
+  }
+  lastTimeMovementOff = 0;
+  lastTimeMovementOn = now;
 }
 
 void onNoMovementDetected()
 {  
-  mqttClient.publish(concat(MQTT_SENSORS_BASE, "presence"), "false");  
+  Serial.print(millis());
+  Serial.println(" No more movement detected");
+  lastTimeMovementOff = millis();
+}
+
+void checkPresence()
+{
+  if (presence || millis() - lastTimeMovementOn < presenceDelay)
+    return;
+
+  Serial.print(millis());
+  Serial.println(" Presence ON");
+  presence = true;
+  mqttClient.publish(MQTT_TOPIC_PRESENCE, "true");
+
+  if (darkness)
+    changeLedState(true);
 }
 
 void checkPresenceTimeout()
 {  
-  if (presence && millis() - lastMovementTime > config.getIntValue(CONFIG_ID_PRESENCE_TIMEOUT) * 1000)
+  if (millis() - lastTimeMovementOff < presenceDelay) 
+    return;
+
+  if (presence)
   {
-    Serial.println("Presence timed out");
+    lastTimePresenceOff = millis();
+    Serial.print(lastTimePresenceOff);
+    Serial.println(" Presence OFF");
     presence = false;
-    evaluateTurnLedOnOrOff();
+    mqttClient.publish(MQTT_TOPIC_PRESENCE, "false");  
+  }
+  checkLightTimeout();
+}
+
+void checkLightTimeout()
+{  
+  if (ledOn && millis() - lastTimePresenceOff > config.getIntValue(CONFIG_ID_LIGHT_TIMEOUT) * 1000)
+  {
+    Serial.print(millis());
+    Serial.println(" Light timed out");
+    changeLedState(false);
   }
 }
 
-void evaluateTurnLedOnOrOff()
+void setSensitivity(int sensitivity)
 {
-  // do not turn off again when it becomes lighter, this leads to blinking
-  if (darkness || !presence)
-  {
-    changeLedState(presence);
-  }
+  // convert sensitivity value (1-10) to times 
+  // 1 = 10000ms
+  // 10 = 0ms
+  presenceDelay = (11 - sensitivity) * 1000;
+
+  // 1 = 300ms
+  // 10 = 3000ms
+  presenceAllowedOffTime = sensitivity * 300;
 }
 
 int mapColor(String value)
@@ -510,6 +564,11 @@ void setLed(int r, int g, int b)
   analogWrite(PIN_LED_BLUE, b);  
 }
 
+void OnConfigurationUpdated()
+{
+  setSensitivity(config.getIntValue(CONFIG_ID_SENSITIVITY));
+}
+
 void OnMqttMessageReceived(char* topic, byte* payload, unsigned int length)
 {
   Serial.print("Message arrived [");
@@ -542,7 +601,7 @@ void OnMqttMessageReceived(char* topic, byte* payload, unsigned int length)
 
     Serial.print("Set light timeout to (s) ");
     Serial.println(result);
-    config.setValue(CONFIG_ID_PRESENCE_TIMEOUT, result);
+    config.setValue(CONFIG_ID_LIGHT_TIMEOUT, result);
     config.saveConfiguration();
     checkPresenceTimeout();
   }
@@ -581,6 +640,19 @@ void OnMqttMessageReceived(char* topic, byte* payload, unsigned int length)
     Serial.print("Set sweep delay to (ms) ");
     Serial.println(result);
     config.setValue(CONFIG_ID_SWEEP_DELAY, result);
+    config.saveConfiguration();
+    return;
+  }
+  if (String(topic) == String(MQTT_TOPIC_SENSITIVITY)) 
+  {
+    int result = atoi((const char*)payload);
+    if (result < 1 || result > 10)
+      return;
+
+    Serial.print("Set sensitivity to ");
+    Serial.println(result);
+    setSensitivity(result);
+    config.setValue(CONFIG_ID_SENSITIVITY, result);
     config.saveConfiguration();
     return;
   }
