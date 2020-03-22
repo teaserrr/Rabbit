@@ -7,6 +7,7 @@
 #include <Adafruit_BME280.h>
 #include <WiFiManagerConfig.h>
 #include <ArduinoOTA.h>
+#include "src/html.h"
 
 /* ----------------------------------------------------------- */
 
@@ -227,43 +228,52 @@ void setup()
 
 String createHTML()
 {
-  String ptr = "<!DOCTYPE html> <html>\n";
-  ptr += "<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\">\n";
-  ptr += "<title>";
-  ptr += DEVICE_NAME;
-  ptr += "</title>\n";
-  ptr += "<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center;}\n";
-  ptr += "body{margin-top: 50px;} h1 {color: #444444;margin: 50px auto 30px;}\n";
-  ptr += "p {font-size: 24px;color: #444444;margin-bottom: 10px;}\n";
-  ptr += "</style>\n";
-  ptr += "</head>\n";
-  ptr += "<body>\n";
-  ptr += "<div id=\"webpage\">\n";
-  ptr += "<h1>";
-  ptr += DEVICE_NAME;
-  ptr += "</h1>\n";
-  ptr += "<p>Temperature: ";
-  ptr += lastTemperature;
-  ptr += "&deg;C</p>";
-  ptr += "<p>Humidity: ";
-  ptr += lastHumidity;
-  ptr += "%</p>";
-  ptr += "<p>Pressure: ";
-  ptr += lastPressure;
-  ptr += "hPa</p>";
-  ptr += "<p>Light value: ";
-  ptr += lastLightValue;
-  ptr += "</p>";
-  ptr += "<p>Presence: ";
-  ptr += (presence ? "yes" : "no");
-  ptr += "</p>";
-  ptr += "<p>Light on: ";
-  ptr += (ledOn ? "yes" : "no");
-  ptr += "</p>";
-  ptr += "</div>\n";
-  ptr += "</body>\n";
-  ptr += "</html>\n";
-  return ptr;
+  String html = FPSTR(RABBIT_HTTP_HEADER);
+  html += FPSTR(RABBIT_HTTP_STYLE);
+  html += FPSTR(RABBIT_HTTP_BODY);
+  html.replace("{device}", DEVICE_NAME);
+  html += FPSTR(RABBIT_HTTP_TABLE);
+
+  String tempHtml = FPSTR(RABBIT_HTTP_ITEM);
+  tempHtml.replace("{key}", "Temperature");
+  tempHtml.replace("{value}", String(lastTemperature));
+  tempHtml.replace("{unit}", "&deg;C");
+  html += tempHtml;
+  
+  String humHtml = FPSTR(RABBIT_HTTP_ITEM);
+  humHtml.replace("{key}", "Humidity");
+  humHtml.replace("{value}", String(lastHumidity));
+  humHtml.replace("{unit}", "%");
+  html += humHtml;
+  
+  String presHtml = FPSTR(RABBIT_HTTP_ITEM);
+  presHtml.replace("{key}", "Pressure");
+  presHtml.replace("{value}", String(lastPressure));
+  presHtml.replace("{unit}", "hPa");
+  html += presHtml;
+  
+  String lightHtml = FPSTR(RABBIT_HTTP_ITEM);
+  lightHtml.replace("{key}", "Light value");
+  lightHtml.replace("{value}", String(lastLightValue));
+  lightHtml.replace("{unit}", "");
+  html += lightHtml;
+  
+  String presenceHtml = FPSTR(RABBIT_HTTP_ITEM);
+  presenceHtml.replace("{key}", "Presence");
+  presenceHtml.replace("{value}", presence ? "yes" : "no");
+  presenceHtml.replace("{unit}", "");
+  html += presenceHtml;
+  
+  String onHtml = FPSTR(RABBIT_HTTP_ITEM);
+  onHtml.replace("{key}", "Light on");
+  onHtml.replace("{value}", ledOn ? "yes" : "no");
+  onHtml.replace("{unit}", "");
+  html += onHtml;
+
+  html += FPSTR(RABBIT_HTTP_TABLE_END);
+  html += FPSTR(RABBIT_HTTP_LINK_BUTTON);
+  html += FPSTR(RABBIT_HTTP_END);
+  return html;
 }
 
 void httpHandleRoot() 
